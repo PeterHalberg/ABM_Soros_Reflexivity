@@ -1,0 +1,155 @@
+import torch 
+import torch.nn as nn
+from random import random
+from math import log10
+import matplotlib.pyplot as plt
+
+#GLOBAL
+agents = []
+history = []
+price = 0.0
+real_price = 0.0
+gini_history = []
+
+def engine (bids, money, assets):
+    global price, real_price
+    actions = bids[:, 0]
+    volumes = bids[:, 1]
+
+    buy_mask = (actions>0)
+    sell_mask = (actions<0)
+
+    buy_fund = money[buy_mask]*volumes[buy_mask]
+    sell_stock = assets[sell_mask]*volumes[sell_mask]
+
+    total_buy_fund = float(buy_fund.sum())
+    total_sell_stock = float(sell_stock.sum())
+
+    if total_sell_stock == 0:
+        price = (price+real_price)/2
+    else:
+        price = total_buy_fund/total_sell_stock
+        real_price = real_price*1.01 + price/1000
+    
+    new_money = money.clone()
+    new_assets = assets.clone()
+    
+    if total_buy_fund > 0:
+        spent = money[buy_mask] * volumes[buy_mask]
+        new_assets[buy_mask] += spent / price
+        new_money[buy_mask] -= spent
+
+    if total_sell_stock > 0:
+        # Продавцы отдают активы и получают деньги по НОВОЙ цене
+        sold = assets[sell_mask] * volumes[sell_mask]
+        new_assets[sell_mask] -= sold
+        new_money[sell_mask] += sold * price
+
+    return new_money.tolist(), new_assets.tolist()
+
+class SorosAgent(nn.Module):
+    def __init__(self):
+        super(SorosAgent,self).__init__()
+        self.optimism = 0.0
+        self.money = 0.0
+        self.assets = 0.0
+        self.wealth = 0.0
+        self.gru = nn.GRU(input_size=1,hidden_size=8,batch_first=True)
+        self.mood = 0.5
+        self.decision_layer = nn.Linear(45,2)
+        self.top_5_list = [([0.0,0.0,0.0,0.0,0.0],0.0,0.0)]*5
+        self.top_5_tensor = torch.zeros((1,35))
+        self.last_action = 0.0
+
+    def forward(self, history_slice):
+        h_tensor = torch.tensor(history_slice).float().view(1, 5, 1)
+        _, h_n = self.gru(h_tensor)
+        trend_feature = h_n[-1]
+
+        mood_tensor = torch.tensor([[float(self.mood)]]).float()
+        ratio_tensor = torch.tensor([[float(self.money / (self.wealth + 1e-6))]]).float()
+
+        full_context = torch.cat((
+            trend_feature,     
+            self.top_5_tensor, 
+            mood_tensor,      
+            ratio_tensor 
+        ), dim=1)
+
+        decision = self.decision_layer(full_context)
+        
+        action = torch.tanh(decision[:, 0])
+        volume = torch.sigmoid(decision[:, 1])
+
+        return action.item(), volume.item()
+
+    def update_state(self):
+        owealth = self.wealth
+        self.wealth = self.assets*price + self.money
+        profit = self.wealth - owealth
+        self.mood = self.mood+(profit*self.optimism)/100
+        self.top_5_list.sort(key = lambda i: i[2])
+        if profit>self.top_5_list[0][2]:
+            self.top_5_list[0]=(history[-6:],self.last_action,float(profit))
+
+def bank_start(ag_num):
+    global price, real_price, history, agents
+    history = [i*0+100*random() for i in range(5)]
+    price = history[4]
+    real_price = price
+    credits_list = []
+    ag_list = []
+    for i in range(int(ag_num/100)):
+        credits_list.append(1000)
+    for i in range(int(ag_num/10)):
+        credits_list.append(100)
+    while len(credits_list)<ag_num:
+        credits_list.append(10)
+    for i in range(ag_num):
+        seed = random()
+        agent = SorosAgent()
+        agent.money = credits_list[i]*seed
+        agent.assets = credits_list[i]*(1-seed)
+        agent.optimism = abs(seed - log10(credits_list[i])/10)
+        agent.wealth = agent.money + agent.assets*price
+        ag_list.append(agent)
+    agents = nn.ModuleList(ag_list)
+
+def get_gini():
+    w = sorted([a.wealth for a in agents])
+    n = len(w)
+    if n == 0 or sum(w) == 0: return 0
+    sum_diffs = sum(abs(x - y) for x in w for y in w)
+    return sum_diffs / (2 * n * sum(w))
+
+bank_start(100)
+print(price,real_price)
+for step in range(100):
+    bids_list = []
+    m_list = []
+    a_list = []
+    
+    for agent in agents:
+        act, vol = agent.forward(history[-5:])
+        bids_list.append([act, vol])
+        m_list.append(agent.money)
+        a_list.append(agent.assets)
+        
+    bids_tensor = torch.tensor(bids_list).float()
+    money_tensor = torch.tensor(m_list).float()
+    assets_tensor = torch.tensor(a_list).float()
+    
+    m_new, a_new = engine(bids_tensor, money_tensor, assets_tensor)
+    
+    history.append(price)
+    for i, agent in enumerate(agents):
+        agent.money = m_new[i]
+        agent.assets = a_new[i]
+        agent.update_state()
+    gini_history.append(get_gini()*100)
+
+plt.style.use("seaborn-v0_8-muted")
+plt.plot([i for i in range(1,106)],history,color="blue")
+plt.plot([i for i in range(6,106)],gini_history,color="red")
+plt.grid(True,linestyle="--")
+plt.show()
