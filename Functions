@@ -16,3 +16,11 @@ def top_5_vision(arr):
         out.append(act)
         out.append(prof)
     return out
+
+def forward_tensor(tp5,hist,mood,optimism):
+    tp5 = top_5_vision(tp5)
+    hist = arr_vision(hist)
+    lst = tp5 + hist
+    lst.append(mood)
+    lst.append(optimism)
+    return torch.tensor(lst)
